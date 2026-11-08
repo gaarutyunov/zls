@@ -1353,6 +1353,99 @@ test "block to expression - nested labeled switch" {
     , .@"refactor.rewrite", null);
 }
 
+test "block to expression - early breaks" {
+    try testRefactor(
+        \\fn foo(a: ?u32, b: bool) u32 {
+        \\    const value = blk: {
+        \\        <cursor>if (a) |x| break :blk x;
+        \\        if (b) break :blk 1;
+        \\        break :blk 2;
+        \\    };
+        \\    return value;
+        \\}
+        \\
+    ,
+        \\fn foo(a: ?u32, b: bool) u32 {
+        \\    const value = if (a) |x| x else if (b) 1 else 2;
+        \\    return value;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    // statements without a value can not be converted
+    try testRefactor(
+        \\fn bar() void {}
+        \\fn foo(b: bool) u32 {
+        \\    const value = blk: {
+        \\        <cursor>bar();
+        \\        if (b) break :blk 1;
+        \\        break :blk 2;
+        \\    };
+        \\    return value;
+        \\}
+        \\
+    ,
+        \\fn bar() void {}
+        \\fn foo(b: bool) u32 {
+        \\    const value = blk: {
+        \\        bar();
+        \\        if (b) break :blk 1;
+        \\        break :blk 2;
+        \\    };
+        \\    return value;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "block to expression - assignments in branches" {
+    try testRefactor(
+        \\const Kind = enum { a, b, c };
+        \\fn foo(kind: Kind, c: bool) u32 {
+        \\    var <cursor>value: u32 = undefined;
+        \\    switch (kind) {
+        \\        .a => value = 1,
+        \\        .b => {
+        \\            value = if (c) 2 else 3;
+        \\        },
+        \\        .c => unreachable,
+        \\    }
+        \\    return value;
+        \\}
+        \\
+    ,
+        \\const Kind = enum { a, b, c };
+        \\fn foo(kind: Kind, c: bool) u32 {
+        \\    const value: u32 = switch (kind) {
+        \\        .a => 1,
+        \\        .b => if (c) 2 else 3,
+        \\        .c => unreachable,
+        \\    };
+        \\    return value;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    try testRefactor(
+        \\fn foo(c: bool) u32 {
+        \\    var <cursor>value: u32 = undefined;
+        \\    if (c) {
+        \\        value = 1;
+        \\    } else {
+        \\        value = 2;
+        \\    }
+        \\    value += 1;
+        \\    return value;
+        \\}
+        \\
+    ,
+        \\fn foo(c: bool) u32 {
+        \\    var value: u32 = if (c) 1 else 2;
+        \\    value += 1;
+        \\    return value;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+}
+
 test "block to expression - switch prong" {
     try testRefactor(
         \\fn foo(a: u32, b: u32) void {

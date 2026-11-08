@@ -39,6 +39,20 @@ The majority of LSP features are supported:
 - Semantic tokens highlighting
 - Inlay hints
 - Code actions
+- Refactorings (fork-specific)
+  - **Extract into function** (`refactor.extract`): select statements, or put the cursor on the `{` / label of a block. Local variables from the enclosing function become typed parameters. Mutated `var`s are passed by pointer, and declarations used after the selection are returned (as a tuple when there are several). `blk: { ... break :blk value; }` becomes a function that returns `value`.
+  - **Rename file** (`workspace/willRenameFiles` and `textDocument/rename` on an `@import("file.zig")` path): renaming or moving a file or folder updates every relative `@import`/`@embedFile` path that refers to it, including the moved file's own imports.
+  - **Convert block to expression** (`refactor.rewrite`):
+    - `.a => { switch (x) {...} }` → `.a => switch (x) {...}`
+    - `blk: { switch (x) { .a => break :blk 1, ... } }` → `switch (x) { .a => 1, ... }`
+    - `blk: { if (c) break :blk 1; break :blk 2; }` → `if (c) 1 else 2`
+    - `var v: T = undefined; switch (x) { .a => v = 1, ... }` → `const v: T = switch (x) { .a => 1, ... };`
+  - **Inline variable** (`refactor.inline`): `const opts: Foo = .{...}; bar(opts);` → `bar(.{...});`. The action adds parentheses or `@as(T, ...)` when the context requires them.
+  - **Move type into declaration** (`refactor.rewrite`):
+    - `var value = T{...}` → `var value: T = .{...}`
+    - `[_]u8{ 1, 2 }` → `: [2]u8 = .{ 1, 2 }`
+    - `T.init()` → `: T = .init()`
+    - `@as(T, v)` → `: T = v`
 
 ## Quick Thanks :)
 

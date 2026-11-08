@@ -35,6 +35,7 @@ pub fn generate(builder: *Builder, range: types.Range) Error!void {
     if (builder.wantKind(.@"refactor.rewrite")) {
         try explicitTypeAnnotation(builder, ancestors, loc.start);
         try blockToExpression(builder, ancestors);
+        try assignmentsToExpression(builder, ancestors, loc.start);
     }
     if (builder.wantKind(.@"refactor.inline")) {
         try inlineVariable(builder, loc.start);
@@ -389,8 +390,9 @@ fn convertBlockToExpression(
 
     var buffer: [2]Ast.Node.Index = undefined;
     const statements = tree.blockStatements(&buffer, block) orelse return false;
-    if (statements.len != 1) return false;
-    const stmt = statements[0];
+    if (statements.len == 0) return false;
+    if (statements.len != 1 and ast.blockLabel(tree, block) == null) return false;
+    const stmt = statements[statements.len - 1];
 
     const lbrace = tree.nodeMainToken(block);
     const rbrace = ast.lastToken(tree, block);
@@ -400,9 +402,23 @@ fn convertBlockToExpression(
     if (ast.blockLabel(tree, block)) |label_token| {
         const label = offsets.tokenToSlice(tree, label_token);
         var found_break = false;
-        const text = try yieldRewrite(builder, stmt, label, &found_break) orelse return false;
+        // `if (a) break :blk x; if (b) break :blk y; break :blk z;` -> `if (a) x else if (b) y else z`
+        var text: std.ArrayList(u8) = .empty;
+        for (statements[0 .. statements.len - 1]) |early| {
+            const if_node = ast.fullIf(tree, early) orelse return false;
+            if (if_node.ast.else_expr != .none) return false;
+            const then_text = try yieldRewrite(builder, if_node.ast.then_expr, .{ .label = label }, &found_break) orelse return false;
+            const if_text = try spliceText(builder.arena, tree.source, offsets.nodeToLoc(tree, early), &.{
+                .{ .loc = offsets.nodeToLoc(tree, if_node.ast.then_expr), .text = then_text },
+            });
+            const early_indent = lineIndent(tree.source, offsets.nodeToLoc(tree, early).start);
+            try text.appendSlice(builder.arena, try reindent(builder.arena, if_text, early_indent, block_line_indent, false));
+            try text.appendSlice(builder.arena, " else ");
+        }
+        const last_text = try yieldRewrite(builder, stmt, .{ .label = label }, &found_break) orelse return false;
         if (!found_break) return false;
-        const new_text = try reindent(builder.arena, text, stmt_indent, block_line_indent, false);
+        try text.appendSlice(builder.arena, try reindent(builder.arena, last_text, stmt_indent, block_line_indent, false));
+        const new_text = text.items;
 
         const loc: offsets.Loc = .{ .start = tree.tokenStart(label_token), .end = offsets.tokenToLoc(tree, rbrace).end };
         try builder.actions.append(builder.arena, .{
@@ -461,16 +477,99 @@ fn convertBlockToExpression(
     return true;
 }
 
-/// Rewrites a statement that yields a value through `break :label value` into an expression.
+const YieldTarget = union(enum) {
+    /// `break :label value`
+    label: []const u8,
+    /// `name = value`
+    assign: []const u8,
+};
+
+/// `var x: T = undefined; switch (y) { .a => x = 1, .b => x = 2 }` -> `const x: T = switch (y) { .a => 1, .b => 2 };`
+fn assignmentsToExpression(builder: *Builder, ancestors: []const Ast.Node.Index, index: usize) Error!void {
+    const tree = &builder.handle.tree;
+
+    const decl_node = for (ancestors) |node| {
+        if (tree.fullVarDecl(node) != null) break node;
+    } else return;
+    const var_decl = tree.fullVarDecl(decl_node).?;
+    if (tree.tokenTag(var_decl.ast.mut_token) != .keyword_var) return;
+    const init_node = var_decl.ast.init_node.unwrap() orelse return;
+    if (tree.nodeTag(init_node) != .identifier or !std.mem.eql(u8, offsets.nodeToSlice(tree, init_node), "undefined")) return;
+    if (index > offsets.nodeToLoc(tree, init_node).end) return;
+
+    const block = enclosingBlock(builder, decl_node) orelse return;
+    var buffer: [2]Ast.Node.Index = undefined;
+    const statements = tree.blockStatements(&buffer, block).?;
+    const decl_index = std.mem.findScalar(Ast.Node.Index, statements, decl_node).?;
+    if (decl_index + 1 >= statements.len) return;
+    const stmt = statements[decl_index + 1];
+    if (tree.fullSwitch(stmt) == null and ast.fullIf(tree, stmt) == null) return;
+
+    const name_token = var_decl.ast.mut_token + 1;
+    const name = offsets.identifierTokenToNameSlice(tree, name_token);
+
+    var found = false;
+    const text = try yieldRewrite(builder, stmt, .{ .assign = name }, &found) orelse return;
+    if (!found) return;
+
+    // keep `var` if the variable is modified afterwards
+    const is_mutated = blk: {
+        var t = stmtEndToken(tree, stmt) + 1;
+        while (t < ast.lastToken(tree, block)) : (t += 1) {
+            if (tree.tokenTag(t) != .identifier or tree.tokenTag(t - 1) == .period) continue;
+            if (!std.mem.eql(u8, offsets.identifierTokenToNameSlice(tree, t), name)) continue;
+            if (isMutatingUsage(tree, t)) break :blk true;
+        }
+        break :blk false;
+    };
+
+    const type_text = if (var_decl.ast.type_node.unwrap()) |type_node|
+        try builder.arena.print(": {s}", .{offsets.nodeToSlice(tree, type_node)})
+    else
+        "";
+    const reindented = try reindent(
+        builder.arena,
+        text,
+        lineIndent(tree.source, offsets.nodeToLoc(tree, stmt).start),
+        lineIndent(tree.source, tree.tokenStart(var_decl.firstToken())),
+        false,
+    );
+    const new_text = try builder.arena.print("{s} {s}{s} = {s};", .{
+        if (is_mutated) "var" else "const",
+        offsets.tokenToSlice(tree, name_token),
+        type_text,
+        reindented,
+    });
+    const loc: offsets.Loc = .{ .start = tree.tokenStart(var_decl.firstToken()), .end = stmtLoc(tree, stmt).end };
+    try builder.actions.append(builder.arena, .{
+        .title = "convert assignments to expression",
+        .kind = .@"refactor.rewrite",
+        .isPreferred = false,
+        .edit = try builder.createWorkspaceEdit(&.{builder.createTextEditLoc(loc, new_text)}),
+    });
+}
+
+/// Rewrites a statement that yields a value through `break :label value` (or `name = value`) into an expression.
 /// Returns `null` if the statement can not be represented as an expression.
-fn yieldRewrite(builder: *Builder, node: Ast.Node.Index, label: []const u8, found_break: *bool) Error!?[]const u8 {
+fn yieldRewrite(builder: *Builder, node: Ast.Node.Index, target: YieldTarget, found_break: *bool) Error!?[]const u8 {
     const tree = &builder.handle.tree;
 
     switch (tree.nodeTag(node)) {
+        .assign => {
+            const name = switch (target) {
+                .assign => |name| name,
+                .label => return null,
+            };
+            const lhs, const rhs = tree.nodeData(node).node_and_node;
+            if (tree.nodeTag(lhs) != .identifier) return null;
+            if (!std.mem.eql(u8, offsets.identifierTokenToNameSlice(tree, tree.nodeMainToken(lhs)), name)) return null;
+            found_break.* = true;
+            return offsets.nodeToSlice(tree, rhs);
+        },
         .@"break" => {
             const label_token, const rhs = tree.nodeData(node).opt_token_and_opt_node;
             if (label_token.unwrap()) |lt| {
-                if (std.mem.eql(u8, offsets.tokenToSlice(tree, lt), label)) {
+                if (target == .label and std.mem.eql(u8, offsets.tokenToSlice(tree, lt), target.label)) {
                     found_break.* = true;
                     const value = rhs.unwrap() orelse return "{}";
                     return offsets.nodeToSlice(tree, value);
@@ -491,7 +590,7 @@ fn yieldRewrite(builder: *Builder, node: Ast.Node.Index, label: []const u8, foun
             var buffer: [2]Ast.Node.Index = undefined;
             const statements = tree.blockStatements(&buffer, node).?;
             if (statements.len != 1) return null;
-            const inner = try yieldRewrite(builder, statements[0], label, found_break) orelse return null;
+            const inner = try yieldRewrite(builder, statements[0], target, found_break) orelse return null;
             return try reindent(
                 builder.arena,
                 inner,
@@ -510,14 +609,13 @@ fn yieldRewrite(builder: *Builder, node: Ast.Node.Index, label: []const u8, foun
         if (switch_node.label_token != null) return null;
         for (switch_node.ast.cases) |case_node| {
             const case = tree.fullSwitchCase(case_node).?;
-            const target = case.ast.target_expr;
-            const text = try yieldRewrite(builder, target, label, found_break) orelse return null;
-            try splices.append(builder.arena, .{ .loc = offsets.nodeToLoc(tree, target), .text = text });
+            const text = try yieldRewrite(builder, case.ast.target_expr, target, found_break) orelse return null;
+            try splices.append(builder.arena, .{ .loc = offsets.nodeToLoc(tree, case.ast.target_expr), .text = text });
         }
     } else if (ast.fullIf(tree, node)) |if_node| {
         const else_expr = if_node.ast.else_expr.unwrap() orelse return null;
         for ([_]Ast.Node.Index{ if_node.ast.then_expr, else_expr }) |branch| {
-            const text = try yieldRewrite(builder, branch, label, found_break) orelse return null;
+            const text = try yieldRewrite(builder, branch, target, found_break) orelse return null;
             try splices.append(builder.arena, .{ .loc = offsets.nodeToLoc(tree, branch), .text = text });
         }
     } else return null;
@@ -552,7 +650,7 @@ const ExtractMode = union(enum) {
     /// an unlabeled block statement `{ ... }`
     block_statement: Ast.Node.Index,
     /// a labeled block `blk: { ... break :blk value; }`
-    labeled_block: struct { block: Ast.Node.Index, label: []const u8, is_expression: bool },
+    labeled_block: struct { block: Ast.Node.Index, label: []const u8, is_expression: bool, parent: Ast.Node.Index },
 };
 
 fn extractFunction(builder: *Builder, selection: offsets.Loc, ancestors: []const Ast.Node.Index) Error!void {
@@ -580,7 +678,7 @@ fn extractFunction(builder: *Builder, selection: offsets.Loc, ancestors: []const
         if (parent_index >= ancestors.len) return;
         const parent = ancestors[parent_index];
         if (ast.blockLabel(tree, block)) |label| {
-            mode = .{ .labeled_block = .{ .block = block, .label = offsets.tokenToSlice(tree, label), .is_expression = !isBlock(tree, parent) } };
+            mode = .{ .labeled_block = .{ .block = block, .label = offsets.tokenToSlice(tree, label), .is_expression = !isBlock(tree, parent), .parent = parent } };
         } else {
             if (!isBlock(tree, parent)) return; // e.g. a function body
             mode = .{ .block_statement = block };
@@ -781,6 +879,7 @@ fn extractFunction(builder: *Builder, selection: offsets.Loc, ancestors: []const
         .block_statement => "void",
         .labeled_block => |info| blk: {
             if (!info.is_expression) break :blk "void";
+            if (try declaredResultType(builder, info.parent, info.block)) |text| break :blk text;
             const ty = try builder.analyser.resolveTypeOfNode(.of(info.block, builder.handle)) orelse return;
             const text = try ty.stringifyTypeOf(builder.analyser, .{ .truncate_container_decls = true });
             if (!isUsableTypeText(text)) return;
@@ -897,6 +996,30 @@ fn extractFunction(builder: *Builder, selection: offsets.Loc, ancestors: []const
             builder.createTextEditPos(insert_index, fn_text.items),
         }),
     });
+}
+
+/// If `expr` initializes a declaration with an explicit type, returns that type as source text.
+/// `const a: A, const b: B = expr;` returns `struct { A, B }`.
+fn declaredResultType(builder: *Builder, parent: Ast.Node.Index, expr: Ast.Node.Index) error{OutOfMemory}!?[]const u8 {
+    const tree = &builder.handle.tree;
+    if (tree.fullVarDecl(parent)) |var_decl| {
+        if (var_decl.ast.init_node.unwrap() != expr) return null;
+        const type_node = var_decl.ast.type_node.unwrap() orelse return null;
+        return offsets.nodeToSlice(tree, type_node);
+    }
+    if (tree.nodeTag(parent) != .assign_destructure) return null;
+    const destructure = tree.assignDestructure(parent);
+    if (destructure.ast.value_expr != expr) return null;
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(builder.arena, "struct { ");
+    for (destructure.ast.variables, 0..) |variable, i| {
+        const var_decl = tree.fullVarDecl(variable) orelse return null;
+        const type_node = var_decl.ast.type_node.unwrap() orelse return null;
+        if (i != 0) try text.appendSlice(builder.arena, ", ");
+        try text.appendSlice(builder.arena, offsets.nodeToSlice(tree, type_node));
+    }
+    try text.appendSlice(builder.arena, " }");
+    return text.items;
 }
 
 /// Returns the type of the declaration as source text and whether it has to be a comptime parameter.

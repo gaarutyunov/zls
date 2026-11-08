@@ -12,10 +12,20 @@ const Uri = @import("../Uri.zig");
 const offsets = @import("../offsets.zig");
 const ast = @import("../ast.zig");
 const tracy = @import("tracy");
+const file_rename = @import("file_rename.zig");
 
 pub const Error = error{ OutOfMemory, Canceled, InvalidParams };
 
 pub fn @"textDocument/rename"(server: *Server, arena: std.mem.Allocator, request: types.rename.Params) Error!?types.WorkspaceEdit {
+    // renaming the path of an `@import("file.zig")` renames the file
+    import_rename: {
+        const document_uri = Uri.parse(arena, request.textDocument.uri) catch break :import_rename;
+        const handle = server.document_store.getHandle(document_uri) orelse break :import_rename;
+        if (handle.tree.mode == .zon) break :import_rename;
+        const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
+        if (file_rename.importPathLocAtIndex(&handle.tree, source_index) == null) break :import_rename;
+        return try file_rename.renameImportedFile(server, arena, handle, source_index, request.newName);
+    }
     const response = try referencesHandler(server, arena, .{ .rename = request });
     return if (response) |rep| rep.rename else null;
 }
@@ -37,6 +47,15 @@ pub fn @"textDocument/prepareRename"(server: *Server, arena: std.mem.Allocator, 
     };
     const handle = server.document_store.getHandle(document_uri) orelse return null;
     const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
+    if (file_rename.importPathLocAtIndex(&handle.tree, source_index)) |result| {
+        const path_loc, _ = result;
+        return .{
+            .prepare_rename_placeholder = .{
+                .range = offsets.locToRange(handle.tree.source, path_loc, server.offset_encoding),
+                .placeholder = offsets.locToSlice(handle.tree.source, path_loc),
+            },
+        };
+    }
     const name_loc = offsets.identifierLocFromIndex(&handle.tree, source_index) orelse return null;
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     return .{

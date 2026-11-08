@@ -15,6 +15,7 @@ comptime {
     _ = @import("lsp_features/definition.zig");
     _ = @import("lsp_features/diagnostics.zig");
     _ = @import("lsp_features/document_symbol.zig");
+    _ = @import("lsp_features/file_rename.zig");
     _ = @import("lsp_features/folding_range.zig");
     _ = @import("lsp_features/hover.zig");
     _ = @import("lsp_features/inlay_hints.zig");
