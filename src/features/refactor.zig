@@ -849,8 +849,6 @@ fn extractFunction(builder: *Builder, selection: offsets.Loc, ancestors: []const
         // destructuring declarations that escape the selection are not supported
         for (statements) |stmt| {
             if (tree.nodeTag(stmt) != .assign_destructure) continue;
-            const stmt_loc = stmtLoc(tree, stmt);
-            _ = stmt_loc;
             var t = last_token + 1;
             while (t < ast.lastToken(tree, container_block)) : (t += 1) {
                 if (tree.tokenTag(t) != .identifier or tree.tokenTag(t - 1) == .period) continue;
