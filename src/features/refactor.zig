@@ -34,7 +34,12 @@ pub fn generate(builder: *Builder, range: types.Range) Error!void {
 
     if (builder.wantKind(.@"refactor.rewrite")) {
         try explicitTypeAnnotation(builder, ancestors, loc.start);
-        try blockToExpression(builder, ancestors);
+        // The cursor may be before a block that opens on the same line, e.g. on `.a =>` of `.a => {`.
+        const converted = if (blockOpeningOnLine(tree, loc.start)) |lbrace_index|
+            try blockToExpression(builder, try ast.nodesOverlappingIndex(builder.arena, tree, lbrace_index))
+        else
+            false;
+        if (!converted) _ = try blockToExpression(builder, ancestors);
         try assignmentsToExpression(builder, ancestors, loc.start);
     }
     if (builder.wantKind(.@"refactor.inline")) {
@@ -364,13 +369,24 @@ fn containsCall(tree: *const Ast, node: Ast.Node.Index) bool {
 // block to expression
 // ---------------------------------------------------------------------------
 
-fn blockToExpression(builder: *Builder, ancestors: []const Ast.Node.Index) Error!void {
+/// Returns whether a code action has been added.
+fn blockToExpression(builder: *Builder, ancestors: []const Ast.Node.Index) Error!bool {
     const tree = &builder.handle.tree;
     for (ancestors, 0..) |node, i| {
         if (!isBlock(tree, node)) continue;
-        if (i + 1 >= ancestors.len) return;
-        if (try convertBlockToExpression(builder, node, ancestors[i + 1], ancestors[i + 1 ..])) return;
+        if (i + 1 >= ancestors.len) return false;
+        if (try convertBlockToExpression(builder, node, ancestors[i + 1], ancestors[i + 1 ..])) return true;
     }
+    return false;
+}
+
+/// Returns the source index of the `{` that ends the line containing `index`,
+/// if it is located after `index`.
+fn blockOpeningOnLine(tree: *const Ast, index: usize) ?usize {
+    const line_end = std.mem.findScalarPos(u8, tree.source, index, '\n') orelse tree.source.len;
+    const line = std.mem.trimEnd(u8, tree.source[index..line_end], " \t\r");
+    if (line.len == 0 or line[line.len - 1] != '{') return null;
+    return index + line.len - 1;
 }
 
 fn convertBlockToExpression(

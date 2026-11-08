@@ -1474,6 +1474,45 @@ test "block to expression - switch prong" {
     , .@"refactor.rewrite", null);
 }
 
+test "block to expression - cursor before the block on the same line" {
+    // the block that opens on the cursor's line is preferred over the enclosing one
+    try testRefactor(
+        \\fn foo(a: u32, b: u32, c: u32) void {
+        \\    switch (a) {
+        \\        0 => {
+        \\            switch (b) {
+        \\<cursor>                0 => {
+        \\                    switch (c) {
+        \\                        0 => {},
+        \\                        else => {},
+        \\                    }
+        \\                },
+        \\                else => {},
+        \\            }
+        \\        },
+        \\        else => {},
+        \\    }
+        \\}
+        \\
+    ,
+        \\fn foo(a: u32, b: u32, c: u32) void {
+        \\    switch (a) {
+        \\        0 => {
+        \\            switch (b) {
+        \\                0 => switch (c) {
+        \\                    0 => {},
+        \\                    else => {},
+        \\                },
+        \\                else => {},
+        \\            }
+        \\        },
+        \\        else => {},
+        \\    }
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+}
+
 test "block to expression - if statement" {
     try testRefactor(
         \\fn bar() void {}
