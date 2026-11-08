@@ -555,6 +555,9 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
                     .supported = true,
                     .changeNotifications = .{ .bool = true },
                 },
+                .fileOperations = .{
+                    .willRename = .{ .filters = @import("features/file_rename.zig").file_operation_filters },
+                },
             },
             .semanticTokensProvider = .{
                 .semantic_tokens_options = .{
@@ -1270,6 +1273,7 @@ const HandledRequestParams = union(enum) {
     @"textDocument/foldingRange": types.FoldingRange.Params,
     @"textDocument/selectionRange": types.SelectionRange.Params,
     @"workspace/symbol": types.workspace.Symbol.Params,
+    @"workspace/willRenameFiles": types.workspace.RenameFilesParams,
     other: lsp.MethodWithParams,
 };
 
@@ -1314,6 +1318,7 @@ fn isBlockingMessage(msg: Message) bool {
             .@"textDocument/foldingRange",
             .@"textDocument/selectionRange",
             .@"workspace/symbol",
+            .@"workspace/willRenameFiles",
             => return false,
             .other => return false,
         },
@@ -1489,6 +1494,7 @@ pub fn sendRequestSync(server: *Server, arena: std.mem.Allocator, comptime metho
         .@"textDocument/foldingRange" => try @import("features/folding_range.zig").@"textDocument/foldingRange"(server, arena, params),
         .@"textDocument/selectionRange" => try @import("features/selection_range.zig").@"textDocument/selectionRange"(server, arena, params),
         .@"workspace/symbol" => try @import("features/workspace_symbols.zig").@"workspace/symbol"(server, arena, params),
+        .@"workspace/willRenameFiles" => try @import("features/file_rename.zig").@"workspace/willRenameFiles"(server, arena, params),
         .other => return null,
     };
 }

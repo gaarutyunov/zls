@@ -20,6 +20,9 @@ const tracy = @import("tracy");
 pub const supported_code_actions: []const types.CodeAction.Kind = &.{
     .quickfix,
     .refactor,
+    .@"refactor.extract",
+    .@"refactor.inline",
+    .@"refactor.rewrite",
     .source,
     .@"source.organizeImports",
     .@"source.fixAll",
@@ -135,19 +138,26 @@ pub const Builder = struct {
     }
 
     /// Returns `false` if the client explicitly specified that they are not interested in this code action kind.
-    fn wantKind(builder: *Builder, kind: std.meta.Tag(types.CodeAction.Kind)) bool {
+    /// Requesting a parent kind (e.g. `refactor`) includes all of its sub kinds (e.g. `refactor.extract`).
+    pub fn wantKind(builder: *Builder, kind: std.meta.Tag(types.CodeAction.Kind)) bool {
         const only_kinds = builder.only_kinds orelse return true;
-        return only_kinds.contains(kind);
+        if (only_kinds.contains(kind)) return true;
+        return switch (kind) {
+            .@"refactor.extract", .@"refactor.inline", .@"refactor.rewrite" => only_kinds.contains(.refactor),
+            else => false,
+        };
     }
 
     pub fn generateCodeActionsInRange(
         builder: *Builder,
         range: types.Range,
-    ) error{OutOfMemory}!void {
+    ) Analyser.Error!void {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
         const tree = &builder.handle.tree;
+
+        try @import("refactor.zig").generate(builder, range);
 
         const source_index = offsets.positionToIndex(tree.source, range.start, builder.offset_encoding);
 
