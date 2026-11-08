@@ -976,6 +976,621 @@ test "convert string literal to multiline - invalid" {
     );
 }
 
+test "move type into declaration - struct init" {
+    try testRefactor(
+        \\const Foo = struct { a: u32 = 0 };
+        \\test {
+        \\    var <cursor>foo = Foo{ .a = 1 };
+        \\    _ = &foo;
+        \\    const bar = Foo{};
+        \\    _ = bar;
+        \\}
+        \\
+    ,
+        \\const Foo = struct { a: u32 = 0 };
+        \\test {
+        \\    var foo: Foo = .{ .a = 1 };
+        \\    _ = &foo;
+        \\    const bar = Foo{};
+        \\    _ = bar;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    try testRefactor(
+        \\const std = @import("std");
+        \\const <cursor>gpa = std.heap.DebugAllocator(.{}){};
+        \\
+    ,
+        \\const std = @import("std");
+        \\const gpa: std.heap.DebugAllocator(.{}) = .{};
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "move type into declaration - array init" {
+    try testRefactor(
+        \\test {
+        \\    const <cursor>array = [_]u8{ 1, 2, 3 };
+        \\    _ = array;
+        \\}
+        \\
+    ,
+        \\test {
+        \\    const array: [3]u8 = .{ 1, 2, 3 };
+        \\    _ = array;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    try testRefactor(
+        \\const <cursor>array = [_:0]u8{ 1, 2 };
+        \\const other = [4]u8{ 1, 2, 3, 4 };
+        \\
+    ,
+        \\const array: [2:0]u8 = .{ 1, 2 };
+        \\const other = [4]u8{ 1, 2, 3, 4 };
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "move type into declaration - decl literal" {
+    try testRefactor(
+        \\const Foo = struct {
+        \\    fn init() Foo {
+        \\        return .{};
+        \\    }
+        \\    fn create() !Foo {
+        \\        return .{};
+        \\    }
+        \\    const default: Foo = .{};
+        \\};
+        \\test {
+        \\    const <cursor>a = Foo.init();
+        \\    _ = a;
+        \\}
+        \\
+    ,
+        \\const Foo = struct {
+        \\    fn init() Foo {
+        \\        return .{};
+        \\    }
+        \\    fn create() !Foo {
+        \\        return .{};
+        \\    }
+        \\    const default: Foo = .{};
+        \\};
+        \\test {
+        \\    const a: Foo = .init();
+        \\    _ = a;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    try testRefactor(
+        \\const Foo = struct {
+        \\    fn create() !Foo {
+        \\        return .{};
+        \\    }
+        \\};
+        \\test {
+        \\    const <cursor>a = try Foo.create();
+        \\    _ = a;
+        \\}
+        \\
+    ,
+        \\const Foo = struct {
+        \\    fn create() !Foo {
+        \\        return .{};
+        \\    }
+        \\};
+        \\test {
+        \\    const a: Foo = try .create();
+        \\    _ = a;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    try testRefactor(
+        \\const Foo = struct {
+        \\    const default: Foo = .{};
+        \\};
+        \\const <cursor>a = Foo.default;
+        \\
+    ,
+        \\const Foo = struct {
+        \\    const default: Foo = .{};
+        \\};
+        \\const a: Foo = .default;
+        \\
+    , .@"refactor.rewrite", null);
+    // the function does not return `Foo`
+    try testRefactor(
+        \\const Foo = struct {
+        \\    fn count() u32 {
+        \\        return 0;
+        \\    }
+        \\};
+        \\const <cursor>a = Foo.count();
+        \\
+    ,
+        \\const Foo = struct {
+        \\    fn count() u32 {
+        \\        return 0;
+        \\    }
+        \\};
+        \\const a = Foo.count();
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "move type into declaration - @as" {
+    try testRefactor(
+        \\const <cursor>a = @as(u32, 5);
+        \\
+    ,
+        \\const a: u32 = 5;
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "inline variable - function argument" {
+    try testRefactor(
+        \\const Foo = struct { a: u32 };
+        \\fn bar(foo: Foo) void {
+        \\    _ = foo;
+        \\}
+        \\test {
+        \\    const <cursor>foo: Foo = .{ .a = 1 };
+        \\    bar(foo);
+        \\}
+        \\
+    ,
+        \\const Foo = struct { a: u32 };
+        \\fn bar(foo: Foo) void {
+        \\    _ = foo;
+        \\}
+        \\test {
+        \\    bar(.{ .a = 1 });
+        \\}
+        \\
+    , .@"refactor.inline", null);
+    // cursor on the usage
+    try testRefactor(
+        \\const Foo = struct { a: u32 };
+        \\fn bar(foo: Foo) void {
+        \\    _ = foo;
+        \\}
+        \\test {
+        \\    const foo = Foo{ .a = 1 };
+        \\    bar(<cursor>foo);
+        \\}
+        \\
+    ,
+        \\const Foo = struct { a: u32 };
+        \\fn bar(foo: Foo) void {
+        \\    _ = foo;
+        \\}
+        \\test {
+        \\    bar(Foo{ .a = 1 });
+        \\}
+        \\
+    , .@"refactor.inline", null);
+}
+
+test "inline variable - field and address of" {
+    try testRefactor(
+        \\const Color = struct { r: f32, g: f32 };
+        \\const Attachment = struct { clear_value: Color };
+        \\fn begin(attachments: []const Attachment) void {
+        \\    _ = attachments;
+        \\}
+        \\test {
+        \\    const <cursor>sky_blue: Color = .{ .r = 0.7, .g = 0.9 };
+        \\    const attachments = [_]Attachment{.{
+        \\        .clear_value = sky_blue,
+        \\    }};
+        \\    begin(&attachments);
+        \\}
+        \\
+    ,
+        \\const Color = struct { r: f32, g: f32 };
+        \\const Attachment = struct { clear_value: Color };
+        \\fn begin(attachments: []const Attachment) void {
+        \\    _ = attachments;
+        \\}
+        \\test {
+        \\    const attachments = [_]Attachment{.{
+        \\        .clear_value = .{ .r = 0.7, .g = 0.9 },
+        \\    }};
+        \\    begin(&attachments);
+        \\}
+        \\
+    , .@"refactor.inline", null);
+    try testRefactor(
+        \\const Attachment = struct { a: u32 };
+        \\fn begin(attachments: []const Attachment) void {
+        \\    _ = attachments;
+        \\}
+        \\test {
+        \\    const <cursor>attachments = [_]Attachment{.{
+        \\        .a = 1,
+        \\    }};
+        \\    begin(&attachments);
+        \\}
+        \\
+    ,
+        \\const Attachment = struct { a: u32 };
+        \\fn begin(attachments: []const Attachment) void {
+        \\    _ = attachments;
+        \\}
+        \\test {
+        \\    begin(&[_]Attachment{.{
+        \\        .a = 1,
+        \\    }});
+        \\}
+        \\
+    , .@"refactor.inline", null);
+}
+
+test "inline variable - parentheses and @as" {
+    try testRefactor(
+        \\fn foo(a: u32, b: u32) u32 {
+        \\    const <cursor>sum = a + b;
+        \\    return sum * 2 + sum;
+        \\}
+        \\
+    ,
+        \\fn foo(a: u32, b: u32) u32 {
+        \\    return (a + b) * 2 + (a + b);
+        \\}
+        \\
+    , .@"refactor.inline", null);
+    try testRefactor(
+        \\const Foo = struct { a: u32 };
+        \\test {
+        \\    const <cursor>foo: Foo = .{ .a = 1 };
+        \\    _ = foo.a;
+        \\}
+        \\
+    ,
+        \\const Foo = struct { a: u32 };
+        \\test {
+        \\    _ = @as(Foo, .{ .a = 1 }).a;
+        \\}
+        \\
+    , .@"refactor.inline", null);
+    // side effects would be duplicated
+    try testRefactor(
+        \\fn bar() u32 {
+        \\    return 1;
+        \\}
+        \\test {
+        \\    const <cursor>foo = bar();
+        \\    _ = foo + foo;
+        \\}
+        \\
+    ,
+        \\fn bar() u32 {
+        \\    return 1;
+        \\}
+        \\test {
+        \\    const foo = bar();
+        \\    _ = foo + foo;
+        \\}
+        \\
+    , .@"refactor.inline", null);
+}
+
+test "block to expression - labeled block with switch" {
+    try testRefactor(
+        \\test {
+        \\    const x: u32 = 1;
+        \\    const y: u32 = blk: {
+        \\        <cursor>switch (x) {
+        \\            0 => break :blk 1,
+        \\            1 => {
+        \\                break :blk 2;
+        \\            },
+        \\            else => unreachable,
+        \\        }
+        \\    };
+        \\    _ = y;
+        \\}
+        \\
+    ,
+        \\test {
+        \\    const x: u32 = 1;
+        \\    const y: u32 = switch (x) {
+        \\        0 => 1,
+        \\        1 => 2,
+        \\        else => unreachable,
+        \\    };
+        \\    _ = y;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "block to expression - nested labeled switch" {
+    try testRefactor(
+        \\fn foo(a: bool, b: bool) u32 {
+        \\    return blk: {
+        \\        <cursor>switch (a) {
+        \\            true => {
+        \\                switch (b) {
+        \\                    true => break :blk 1,
+        \\                    false => break :blk 2,
+        \\                }
+        \\            },
+        \\            false => if (b) break :blk 3 else break :blk 4,
+        \\        }
+        \\    };
+        \\}
+        \\
+    ,
+        \\fn foo(a: bool, b: bool) u32 {
+        \\    return switch (a) {
+        \\        true => switch (b) {
+        \\            true => 1,
+        \\            false => 2,
+        \\        },
+        \\        false => if (b) 3 else 4,
+        \\    };
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    try testRefactor(
+        \\test {
+        \\    const value = <cursor>blk: {
+        \\        break :blk 5;
+        \\    };
+        \\    _ = value;
+        \\}
+        \\
+    ,
+        \\test {
+        \\    const value = 5;
+        \\    _ = value;
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "block to expression - switch prong" {
+    try testRefactor(
+        \\fn foo(a: u32, b: u32) void {
+        \\    switch (a) {
+        \\        0 => <cursor>{
+        \\            switch (b) {
+        \\                0 => {},
+        \\                else => {},
+        \\            }
+        \\        },
+        \\        else => {},
+        \\    }
+        \\}
+        \\
+    ,
+        \\fn foo(a: u32, b: u32) void {
+        \\    switch (a) {
+        \\        0 => switch (b) {
+        \\            0 => {},
+        \\            else => {},
+        \\        },
+        \\        else => {},
+        \\    }
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "block to expression - if statement" {
+    try testRefactor(
+        \\fn bar() void {}
+        \\fn foo(c: bool) void {
+        \\    if (c) <cursor>{
+        \\        bar();
+        \\    }
+        \\}
+        \\
+    ,
+        \\fn bar() void {}
+        \\fn foo(c: bool) void {
+        \\    if (c) bar();
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+    // multiple statements can not be converted
+    try testRefactor(
+        \\fn bar() void {}
+        \\fn foo(c: bool) void {
+        \\    if (c) <cursor>{
+        \\        bar();
+        \\        bar();
+        \\    }
+        \\}
+        \\
+    ,
+        \\fn bar() void {}
+        \\fn foo(c: bool) void {
+        \\    if (c) {
+        \\        bar();
+        \\        bar();
+        \\    }
+        \\}
+        \\
+    , .@"refactor.rewrite", null);
+}
+
+test "extract function - statements with return value" {
+    try testRefactor(
+        \\fn compute(a: u32, b: u32) u32 {
+        \\    const sum: u32 = a + b;
+        \\    <start>const doubled = sum * 2;
+        \\    const tripled: u32 = doubled + sum + b;<end>
+        \\    return tripled;
+        \\}
+        \\
+    ,
+        \\fn compute(a: u32, b: u32) u32 {
+        \\    const sum: u32 = a + b;
+        \\    const tripled: u32 = extracted(sum, b);
+        \\    return tripled;
+        \\}
+        \\
+        \\fn extracted(sum: u32, b: u32) u32 {
+        \\    const doubled = sum * 2;
+        \\    const tripled: u32 = doubled + sum + b;
+        \\    return tripled;
+        \\}
+        \\
+    , .@"refactor.extract", null);
+}
+
+test "extract function - mutated variable" {
+    try testRefactor(
+        \\const List = struct {
+        \\    len: usize = 0,
+        \\    fn append(list: *List) void {
+        \\        list.len += 1;
+        \\    }
+        \\};
+        \\test {
+        \\    var count: u32 = 0;
+        \\    var list: List = .{};
+        \\    const step: u32 = 2;
+        \\    <start>count += step;
+        \\    list.append();<end>
+        \\}
+        \\
+    ,
+        \\const List = struct {
+        \\    len: usize = 0,
+        \\    fn append(list: *List) void {
+        \\        list.len += 1;
+        \\    }
+        \\};
+        \\test {
+        \\    var count: u32 = 0;
+        \\    var list: List = .{};
+        \\    const step: u32 = 2;
+        \\    extracted(&count, step, &list);
+        \\}
+        \\
+        \\fn extracted(count: *u32, step: u32, list: *List) void {
+        \\    count.* += step;
+        \\    list.append();
+        \\}
+        \\
+    , .@"refactor.extract", null);
+}
+
+test "extract function - block with try" {
+    try testRefactor(
+        \\const Scene = struct {
+        \\    objects: u32 = 0,
+        \\    fn lock(scene: *Scene) !void {
+        \\        _ = scene;
+        \\    }
+        \\    fn update(scene: *Scene, dt: f32) !void {
+        \\        <cursor>{
+        \\            try scene.lock();
+        \\            scene.objects += @intFromFloat(dt);
+        \\        }
+        \\    }
+        \\};
+        \\
+    ,
+        \\const Scene = struct {
+        \\    objects: u32 = 0,
+        \\    fn lock(scene: *Scene) !void {
+        \\        _ = scene;
+        \\    }
+        \\    fn update(scene: *Scene, dt: f32) !void {
+        \\        try extracted(scene, dt);
+        \\    }
+        \\
+        \\    fn extracted(scene: *Scene, dt: f32) !void {
+        \\        try scene.lock();
+        \\        scene.objects += @intFromFloat(dt);
+        \\    }
+        \\};
+        \\
+    , .@"refactor.extract", null);
+}
+
+test "extract function - labeled block" {
+    try testRefactor(
+        \\const Animation = struct { name: []const u8 };
+        \\fn find(animations: []const Animation, name: []const u8) Animation {
+        \\    const animation: Animation = <cursor>blk: {
+        \\        for (animations) |anim| {
+        \\            if (anim.name.len == name.len) break :blk anim;
+        \\        }
+        \\        @panic("cannot find animation");
+        \\    };
+        \\    return animation;
+        \\}
+        \\
+    ,
+        \\const Animation = struct { name: []const u8 };
+        \\fn find(animations: []const Animation, name: []const u8) Animation {
+        \\    const animation: Animation = extracted(animations, name);
+        \\    return animation;
+        \\}
+        \\
+        \\fn extracted(animations: []const Animation, name: []const u8) Animation {
+        \\    for (animations) |anim| {
+        \\        if (anim.name.len == name.len) return anim;
+        \\    }
+        \\    @panic("cannot find animation");
+        \\}
+        \\
+    , .@"refactor.extract", null);
+}
+
+test "extract function - multiple return values" {
+    try testRefactor(
+        \\test {
+        \\    const base: u32 = 3;
+        \\    <start>const a: u32 = base * 2;
+        \\    var b: i64 = 4;<end>
+        \\    b += a;
+        \\}
+        \\
+    ,
+        \\test {
+        \\    const base: u32 = 3;
+        \\    const a, var b = extracted(base);
+        \\    b += a;
+        \\}
+        \\
+        \\fn extracted(base: u32) struct { u32, i64 } {
+        \\    const a: u32 = base * 2;
+        \\    var b: i64 = 4;
+        \\    return .{ a, b };
+        \\}
+        \\
+    , .@"refactor.extract", null);
+}
+
+test "extract function - escaping control flow" {
+    try testRefactor(
+        \\fn foo(a: u32) u32 {
+        \\    <start>if (a == 0) return 1;<end>
+        \\    return 0;
+        \\}
+        \\
+    ,
+        \\fn foo(a: u32) u32 {
+        \\    if (a == 0) return 1;
+        \\    return 0;
+        \\}
+        \\
+    , .@"refactor.extract", null);
+}
+
+fn testRefactor(before: []const u8, after: []const u8, kind: types.CodeAction.Kind, title: ?[]const u8) !void {
+    try testDiagnostic(before, after, .{ .filter_kind = kind, .filter_title = title });
+}
+
 fn testAutofix(before: []const u8, after: []const u8) !void {
     try testDiagnostic(before, after, .{ .filter_kind = .@"source.fixAll", .want_zir = true }); // diagnostics come from std.zig.AstGen
     try testDiagnostic(before, after, .{ .filter_kind = .@"source.fixAll", .want_zir = false }); // diagnostics come from calling zig ast-check
@@ -1045,6 +1660,10 @@ fn testDiagnostic(
             const point = offsets.indexToPosition(before, placeholders[0].start, ctx.server.offset_encoding);
             break :blk .{ .start = point, .end = point };
         },
+        2 => .{
+            .start = offsets.indexToPosition(source, placeholders[0].start, ctx.server.offset_encoding),
+            .end = offsets.indexToPosition(source, placeholders[1].start, ctx.server.offset_encoding),
+        },
         else => unreachable,
     };
 
@@ -1074,7 +1693,12 @@ fn testDiagnostic(
 
         if (options.filter_kind) |kind| {
             // check that `types.CodeActionContext.only` is being respected
-            try std.testing.expectEqual(code_action.kind.?, kind);
+            const action_kind = code_action.kind.?;
+            if (kind == .refactor and std.mem.startsWith(u8, @tagName(action_kind), "refactor.")) {
+                // sub kinds are included when requesting `refactor` but are tested separately
+                continue;
+            }
+            try std.testing.expectEqual(action_kind, kind);
         }
         if (options.filter_title) |title| {
             if (!std.mem.eql(u8, title, code_action.title)) continue;
