@@ -4978,6 +4978,21 @@ pub const NodeWithHandle = struct {
     }
 };
 
+/// Resolves the type of the call expression whose argument list starts with the
+/// `(` at `args_loc.start` and ends with the `)` at `args_loc.end - 1`.
+fn resolveCallAtLoc(analyser: *Analyser, handle: *DocumentStore.Handle, args_loc: offsets.Loc) Error!?Type {
+    const tree = &handle.tree;
+    const nodes = try ast.nodesOverlappingIndexIncludingParseErrors(analyser.arena, tree, args_loc.start);
+    for (nodes) |node| {
+        var buffer: [1]Ast.Node.Index = undefined;
+        const call = tree.fullCall(&buffer, node) orelse continue;
+        if (tree.tokenStart(call.ast.lparen) != args_loc.start) continue;
+        if (offsets.nodeToLoc(tree, node).end != args_loc.end) continue;
+        return try analyser.resolveTypeOfNode(.of(node, handle));
+    }
+    return null;
+}
+
 pub fn getFieldAccessType(
     analyser: *Analyser,
     handle: *DocumentStore.Handle,
@@ -5078,14 +5093,6 @@ pub fn getFieldAccessType(
                 // Can't call a function type, we need a function type instance.
                 if (current_type.?.is_type_val) return null;
 
-                // TODO Actually bind params here when calling functions instead of just skipping args.
-                current_type = try analyser.resolveReturnType(ty) orelse return null;
-
-                if (do_unwrap_error_payload) {
-                    if (try analyser.resolveUnwrapErrorUnionType(current_type.?, .payload)) |unwrapped| current_type = unwrapped;
-                    do_unwrap_error_payload = false;
-                }
-
                 // Skip to the right paren
                 var paren_count: usize = 1;
                 var next = tokenizer.next();
@@ -5097,6 +5104,21 @@ pub fn getFieldAccessType(
                         paren_count += 1;
                     }
                 } else return null;
+
+                // Resolve the call expression with its arguments so that generic
+                // parameters are bound, e.g. `obj.as(T)` returning `*T` as generated
+                // by translate-c for Objective-C types. Fall back to the declared
+                // return type if the call can not be found in the syntax tree.
+                current_type = try analyser.resolveCallAtLoc(handle, .{
+                    .start = loc.start + tok.loc.start,
+                    .end = loc.start + next.loc.end,
+                }) orelse
+                    try analyser.resolveReturnType(ty) orelse return null;
+
+                if (do_unwrap_error_payload) {
+                    if (try analyser.resolveUnwrapErrorUnionType(current_type.?, .payload)) |unwrapped| current_type = unwrapped;
+                    do_unwrap_error_payload = false;
+                }
             },
             .l_bracket => {
                 var bracket_count: usize = 1;
